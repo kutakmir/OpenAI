@@ -9,6 +9,7 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
+import UIKit
 
 final public class OpenAI: OpenAIProtocol {
 
@@ -52,7 +53,7 @@ final public class OpenAI: OpenAIProtocol {
         self.session = session
     }
 
-    public convenience init(configuration: Configuration, session: URLSession = URLSession.shared) {
+    public convenience init(configuration: Configuration, session: URLSession = .openAIBackground) {
         self.init(configuration: configuration, session: session as URLSessionProtocol)
     }
     
@@ -119,44 +120,40 @@ final public class OpenAI: OpenAIProtocol {
 }
 
 extension OpenAI {
-
     func performRequest<ResultType: Codable>(request: any URLRequestBuildable, completion: @escaping (Result<ResultType, Error>) -> Void) {
         do {
-            let request = try request.build(token: configuration.token, 
-                                            organizationIdentifier: configuration.organizationIdentifier,
-                                            timeoutInterval: configuration.timeoutInterval)
-            let task = session.dataTask(with: request) { data, _, error in
-                if let error = error {
-                    completion(.failure(error))
-                    return
-                }
-                guard let data = data else {
-                    completion(.failure(OpenAIError.emptyData))
-                    return
-                }
+            let request = try request.build(token: configuration.token, organizationIdentifier: configuration.organizationIdentifier, timeoutInterval: configuration.timeoutInterval)
 
-                var apiError: Error? = nil
-                do {
-                    let decoded = try JSONDecoder().decode(ResultType.self, from: data)
-                    completion(.success(decoded))
-                } catch {
-                    apiError = error
-                }
-
-                if let apiError = apiError {
+            let delegate = AnyOpenAISessionDelegate.shared
+            delegate.configure { result in
+                switch result {
+                case .success(let data):
+                    var apiError: Error? = nil
                     do {
-                        let decoded = try JSONDecoder().decode(APIErrorResponse.self, from: data)
-                        completion(.failure(decoded))
+                        let decoded = try JSONDecoder().decode(ResultType.self, from: data)
+                        completion(.success(decoded))
                     } catch {
-                        completion(.failure(apiError))
+                        apiError = error
                     }
+
+                    if let apiError = apiError {
+                        do {
+                            let decoded = try JSONDecoder().decode(APIErrorResponse.self, from: data)
+                            completion(.failure(decoded))
+                        } catch {
+                            completion(.failure(apiError))
+                        }
+                    }
+                case .failure(let error):
+                    completion(.failure(error))
                 }
             }
-            task.resume()
+            session.dataTask(with: request).resume()
         } catch {
             completion(.failure(error))
         }
     }
+
     
     func performSteamingRequest<ResultType: Codable>(request: any URLRequestBuildable, onResult: @escaping (Result<ResultType, Error>) -> Void, completion: ((Error?) -> Void)?) {
         do {
@@ -183,7 +180,7 @@ extension OpenAI {
     
     func performSpeechRequest(request: any URLRequestBuildable, completion: @escaping (Result<AudioSpeechResult, Error>) -> Void) {
         do {
-            let request = try request.build(token: configuration.token, 
+            let request = try request.build(token: configuration.token,
                                             organizationIdentifier: configuration.organizationIdentifier,
                                             timeoutInterval: configuration.timeoutInterval)
             
@@ -212,6 +209,12 @@ extension OpenAI {
             task.resume()
         } catch {
             completion(.failure(error))
+        }
+    }
+
+    func interceptApplication(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String, completionHandler: @escaping () -> Void) {
+        if identifier == AnyOpenAISessionDelegate.shared.identifier {
+            AnyOpenAISessionDelegate.shared.backgroundURLSessionCompletionHandler = completionHandler
         }
     }
 }
@@ -248,4 +251,53 @@ extension APIPath {
     func withPath(_ path: String) -> String {
         self + "/" + path
     }
+}
+class AnyOpenAISessionDelegate: NSObject, URLSessionDelegate, URLSessionDataDelegate {
+    static let shared = AnyOpenAISessionDelegate(identifier: "com.openai.backgroundSession")
+
+    private var onComplete: ((Result<Data, Error>) -> Void)?
+    private var receivedData: Data?
+    var backgroundURLSessionCompletionHandler: (() -> Void)?
+
+    let identifier: String
+
+    init(identifier: String) {
+        self.identifier = identifier
+        super.init()
+    }
+
+    func configure(onComplete: @escaping (Result<Data, Error>) -> Void) {
+        self.onComplete = onComplete
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error = error {
+            onComplete?(.failure(error))
+        } else if let data = receivedData {
+            onComplete?(.success(data))
+        } else {
+            onComplete?(.failure(OpenAIError.emptyData))
+        }
+        receivedData = nil
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        if receivedData == nil {
+            receivedData = data
+        } else {
+            receivedData?.append(data)
+        }
+    }
+
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        backgroundURLSessionCompletionHandler?()
+    }
+}
+
+
+public extension URLSession {
+    static let openAIBackground: URLSession = {
+        let delegate = AnyOpenAISessionDelegate.shared
+        return URLSession(configuration: .background(withIdentifier: delegate.identifier), delegate: delegate, delegateQueue: nil)
+    }()
 }
