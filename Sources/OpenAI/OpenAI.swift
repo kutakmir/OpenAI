@@ -212,7 +212,7 @@ extension OpenAI {
         }
     }
 
-    func interceptApplication(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String, completionHandler: @escaping () -> Void) {
+    public func interceptApplication(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String, completionHandler: @escaping () -> Void) {
         if identifier == AnyOpenAISessionDelegate.shared.identifier {
             AnyOpenAISessionDelegate.shared.backgroundURLSessionCompletionHandler = completionHandler
         }
@@ -252,6 +252,7 @@ extension APIPath {
         self + "/" + path
     }
 }
+
 class AnyOpenAISessionDelegate: NSObject, URLSessionDelegate, URLSessionDataDelegate {
     static let shared = AnyOpenAISessionDelegate(identifier: "com.openai.backgroundSession")
 
@@ -293,7 +294,6 @@ class AnyOpenAISessionDelegate: NSObject, URLSessionDelegate, URLSessionDataDele
         backgroundURLSessionCompletionHandler?()
     }
 }
-
 
 public extension URLSession {
     static let openAIBackground: URLSession = {
