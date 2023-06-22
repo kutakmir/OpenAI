@@ -13,6 +13,8 @@ import UIKit
 
 final public class OpenAI: OpenAIProtocol {
 
+    public static let backgroundSessionCallbackNotificationName = Notification.Name("OpenAISDK.backgroundSessionCallbackNotificationName")
+
     public struct Configuration {
         
         /// OpenAI API token. See https://platform.openai.com/docs/api-reference/authentication
@@ -132,11 +134,12 @@ extension OpenAI {
                     do {
                         let decoded = try JSONDecoder().decode(ResultType.self, from: data)
                         completion(.success(decoded))
+                        return
                     } catch {
                         apiError = error
                     }
 
-                    if let apiError = apiError {
+                    if let apiError = apiError {    
                         do {
                             let decoded = try JSONDecoder().decode(APIErrorResponse.self, from: data)
                             completion(.failure(decoded))
@@ -272,6 +275,9 @@ class AnyOpenAISessionDelegate: NSObject, URLSessionDelegate, URLSessionDataDele
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let originalURL = task.originalRequest?.url {
+            NotificationCenter.default.post(name: OpenAI.backgroundSessionCallbackNotificationName, object: originalURL)
+        }
         if let error = error {
             onComplete?(.failure(error))
         } else if let data = receivedData {
@@ -279,6 +285,7 @@ class AnyOpenAISessionDelegate: NSObject, URLSessionDelegate, URLSessionDataDele
         } else {
             onComplete?(.failure(OpenAIError.emptyData))
         }
+        onComplete = nil
         receivedData = nil
     }
 
