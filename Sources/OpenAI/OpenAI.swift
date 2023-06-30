@@ -28,7 +28,7 @@ final public class OpenAI: OpenAIProtocol {
         
         /// Default request timeout
         public let timeoutInterval: TimeInterval
-        
+
         public init(token: String, organizationIdentifier: String? = nil, host: String = "api.openai.com", timeoutInterval: TimeInterval = 60.0) {
             self.token = token
             self.organizationIdentifier = organizationIdentifier
@@ -38,16 +38,23 @@ final public class OpenAI: OpenAIProtocol {
     }
     
     private let session: URLSessionProtocol
+    private var sessionDelegate: AnyOpenAISessionDelegate?
     private var streamingSessions: [NSObject] = []
     
     public let configuration: Configuration
 
-    public convenience init(apiToken: String) {
-        self.init(configuration: Configuration(token: apiToken), session: URLSession.shared)
+    public convenience init(apiToken: String, sharedContainerIdentifier: String? = nil) {
+        self.init(configuration: Configuration(token: apiToken), sharedContainerIdentifier: sharedContainerIdentifier)
     }
-    
-    public convenience init(configuration: Configuration) {
-        self.init(configuration: configuration, session: URLSession.openAIBackground)
+
+    public convenience init(configuration: Configuration, sharedContainerIdentifier: String? = nil) {
+        let delegate = AnyOpenAISessionDelegate.registerDelegate()
+        var urlSessionConfiguration = URLSessionConfiguration.background(withIdentifier: delegate.identifier)
+        urlSessionConfiguration.sharedContainerIdentifier = sharedContainerIdentifier
+
+        let session = URLSession(configuration: urlSessionConfiguration, delegate: delegate, delegateQueue: nil)
+        self.init(configuration: configuration, session: session)
+        self.sessionDelegate = delegate
     }
 
     init(configuration: Configuration, session: URLSessionProtocol) {
@@ -113,29 +120,30 @@ extension OpenAI {
         do {
             let request = try request.build(token: configuration.token, organizationIdentifier: configuration.organizationIdentifier, timeoutInterval: configuration.timeoutInterval)
 
-            let delegate = AnyOpenAISessionDelegate.shared
-            delegate.configure { result in
-                switch result {
-                case .success(let data):
-                    var apiError: Error? = nil
-                    do {
-                        let decoded = try JSONDecoder().decode(ResultType.self, from: data)
-                        completion(.success(decoded))
-                        return
-                    } catch {
-                        apiError = error
-                    }
-
-                    if let apiError = apiError {    
+            if let delegate = sessionDelegate {
+                delegate.configure { result in
+                    switch result {
+                    case .success(let data):
+                        var apiError: Error? = nil
                         do {
-                            let decoded = try JSONDecoder().decode(APIErrorResponse.self, from: data)
-                            completion(.failure(decoded))
+                            let decoded = try JSONDecoder().decode(ResultType.self, from: data)
+                            completion(.success(decoded))
+                            return
                         } catch {
-                            completion(.failure(apiError))
+                            apiError = error
                         }
+
+                        if let apiError = apiError {
+                            do {
+                                let decoded = try JSONDecoder().decode(APIErrorResponse.self, from: data)
+                                completion(.failure(decoded))
+                            } catch {
+                                completion(.failure(apiError))
+                            }
+                        }
+                    case .failure(let error):
+                        completion(.failure(error))
                     }
-                case .failure(let error):
-                    completion(.failure(error))
                 }
             }
             session.dataTask(with: request).resume()
@@ -166,12 +174,24 @@ extension OpenAI {
         }
     }
 
-    public func interceptApplication(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String, completionHandler: @escaping () -> Void) {
-        if identifier == AnyOpenAISessionDelegate.shared.identifier {
-            AnyOpenAISessionDelegate.shared.backgroundURLSessionCompletionHandler = completionHandler
+    public func interceptApplication(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String, completionHandler: @escaping () -> Void) -> Bool {
+        if identifier == AnyOpenAISessionDelegate.default.identifier {
+            AnyOpenAISessionDelegate.default.backgroundURLSessionCompletionHandler = completionHandler
+            return true
         }
 
-        // TODO: Loop over the delegate cache and see if any of them have a matching identifier
+        if let delegate = AnyOpenAISessionDelegate.delegate(identifier: identifier) {
+            delegate.backgroundURLSessionCompletionHandler = completionHandler
+            return true
+        }
+
+        if identifier.hasPrefix(AnyOpenAISessionDelegate.backgroundSessionIdPrefix) {
+            let delegate = AnyOpenAISessionDelegate.registerDelegate()
+            delegate.backgroundURLSessionCompletionHandler = completionHandler
+            return true
+        }
+
+        return false
     }
 }
 
@@ -206,7 +226,19 @@ extension APIPath {
 }
 
 class AnyOpenAISessionDelegate: NSObject, URLSessionDelegate, URLSessionDataDelegate {
-    static let shared = AnyOpenAISessionDelegate(identifier: "com.openai.backgroundSession")
+    static let backgroundSessionIdPrefix = "com.openai.backgroundSession"
+    static let `default` = AnyOpenAISessionDelegate(identifier: backgroundSessionIdPrefix)
+    static private var delegateStore = [String: AnyOpenAISessionDelegate]()
+
+    static func registerDelegate() -> AnyOpenAISessionDelegate {
+        let identifier = backgroundSessionIdPrefix + "." + UUID().uuidString
+        let delegate = AnyOpenAISessionDelegate(identifier: identifier)
+        delegateStore[identifier] = delegate
+        return delegate
+    }
+    static func delegate(identifier: String) -> AnyOpenAISessionDelegate? {
+        delegateStore[identifier]
+    }
 
     private var onComplete: ((Result<Data, Error>) -> Void)?
     private var receivedData: Data?
@@ -253,7 +285,8 @@ class AnyOpenAISessionDelegate: NSObject, URLSessionDelegate, URLSessionDataDele
 
 public extension URLSession {
     static let openAIBackground: URLSession = {
-        let delegate = AnyOpenAISessionDelegate.shared
-        return URLSession(configuration: .background(withIdentifier: delegate.identifier), delegate: delegate, delegateQueue: nil)
+        let delegate = AnyOpenAISessionDelegate.default
+        var configuration = URLSessionConfiguration.background(withIdentifier: delegate.identifier)
+        return URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
     }()
 }
