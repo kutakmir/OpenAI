@@ -282,15 +282,20 @@ class AnyOpenAISessionDelegate: NSObject, URLSessionDelegate, URLSessionDataDele
     static let backgroundSessionIdPrefix = "com.openai.backgroundSession"
     static let `default` = AnyOpenAISessionDelegate(identifier: backgroundSessionIdPrefix)
     static private var delegateStore = [String: AnyOpenAISessionDelegate]()
+    static let delegateStoreQueue = DispatchQueue(label: "AnyOpenAISessionDelegate.queue", attributes: .concurrent) // We allow multiple reads to happen at the same time
 
     static func registerDelegate() -> AnyOpenAISessionDelegate {
         let identifier = backgroundSessionIdPrefix + "." + UUID().uuidString
         let delegate = AnyOpenAISessionDelegate(identifier: identifier)
-        delegateStore[identifier] = delegate
+        delegateStoreQueue.sync(flags: .barrier) {
+            delegateStore[identifier] = delegate
+        }
         return delegate
     }
     static func delegate(identifier: String) -> AnyOpenAISessionDelegate? {
-        delegateStore[identifier]
+        delegateStoreQueue.sync {
+            delegateStore[identifier]
+        }
     }
 
     private var onComplete: ((Result<Data, Error>) -> Void)?
